@@ -1,0 +1,13 @@
+langchain==0.3.27
+langchain-community==0.3.17
+langchain-ollama==0.3.6
+langchain-qdrant 
+langchain-huggingface
+langchain_chroma
+qdrant-client==1.15.1
+chromadb
+pypdf
+pytest
+unstructured
+python-docx
+markdown
