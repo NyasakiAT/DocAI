@@ -11,4 +11,7 @@ pytest
 unstructured
 python-docx
 markdown
+markdown2
 flask
+Flask-SocketIO
+eventlet

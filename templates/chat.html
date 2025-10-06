@@ -1,0 +1,42 @@
+<!doctype html>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.4/css/bulma.min.css">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<title>Hello from Flask</title>
+
+<div class="columns is-mobile is-centered" style="height: 100vh;">
+  <div class="column is-half is-flex is-flex-direction-column">
+    <div id="chat" class="block">
+      <!-- messages -->
+    </div>
+    <form id="f" class="mt-2">
+      <input id="chat-prompt"
+             class="input is-medium"
+             placeholder="Chat here..." />
+      <input type="submit" hidden />
+    </form>
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+<script>
+    const s = io();
+    const chat = document.getElementById('chat');
+
+    function add(text) {
+        const d = document.createElement('div');
+        d.innerHTML = text;
+        d.setAttribute('class', 'box is-shadowless');
+        chat.appendChild(d);
+        chat.scrollTop = chat.scrollHeight;
+    }
+
+    s.on('message', payload => add(payload));
+
+    document.getElementById('f').addEventListener('submit', e => {
+        e.preventDefault();
+        const msg = document.getElementById('chat-prompt').value.trim();
+        if (!msg) return;
+        s.emit('send', { text: msg });
+        document.getElementById('chat-prompt').value = '';
+    });
+</script>

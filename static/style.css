@@ -1,0 +1,41 @@
+    html,
+    body {
+        height: 100%;
+        margin: 0;
+    }
+
+    small {
+        font-size: x-small;
+    }
+
+    #chat {
+        flex: 1;
+        overflow-y: auto;
+        padding-top: 1rem;
+    }
+
+    .chat-wrapper {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        /* full viewport height */
+    }
+
+    .is-centered {
+        height: 100vh;
+    }
+
+    .is-user-box {
+        background-color: hsl(171, 100%, 41%);
+        padding: 0.75rem;
+    }
+
+    .is-agent-box {
+        background-color: hsl(204, 86%, 53%);
+        padding: 0.75rem;
+    }
+
+    .box {
+        margin: 0px;
+        padding: 0px;
+    }

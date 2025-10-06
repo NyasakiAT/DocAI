@@ -2,6 +2,7 @@ import os
 import hashlib
 import uuid
 import sqlite3
+import markdown2
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from langchain_core.documents import Document
@@ -9,9 +10,11 @@ from langchain_ollama import ChatOllama
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain.document_loaders import DirectoryLoader, TextLoader, UnstructuredWordDocumentLoader, UnstructuredMarkdownLoader
 from langchain.document_loaders.pdf import PyPDFDirectoryLoader
+from flask import Flask, render_template
+from flask_socketio import SocketIO, emit
 
 QDRANT_DOCS_COLLECTION = "docs"
-OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "mistral:7b")
+OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gpt-oss:20b")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
@@ -19,13 +22,15 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 
 llm = ChatOllama(model=OLLAMA_CHAT_MODEL, temperature=0.2)
 docdb = sqlite3.connect("document-memory.db")
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 def initialize_db():
     cursor = docdb.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chunks (
-                    content_hash TEXT PRIMARY KEY,
-                    chunk_id TEXT KEY
+                    chunk_id TEXT PRIMARY KEY,
+                    content_hash TEXT KEY
                 )
             ''')
     docdb.commit()
@@ -92,7 +97,8 @@ def create_chunks(documents):
                 all_chunks.append(Document(id=chunk_id, vector=None, page_content=chunk, metadata=chunk_metadata))
                 add_chunk(chunk_id, hashlib.sha256(chunk.encode()).hexdigest())
             else:
-                print(f"Chunk {i} of document {doc.metadata['source']} unchanged, skipping.")
+                pass
+                #print(f"Chunk {i} of document {doc.metadata['source']} unchanged, skipping.")
          
     return all_chunks
 
@@ -119,16 +125,30 @@ def query_rag(query: str):
         )
         relevant_docs = vectorstore.similarity_search(query, k=3)
         context = "\n\n".join([doc.page_content for doc in relevant_docs])
-        prompt = f"Use the following context to answer the question:\n\n{context}\n\nQuestion: {query}\nAnswer:"
+        prompt = f"If needed use the following context to answer the users message:\n{context}\n\nAnswer the following question: {query}"
         response = llm.invoke(prompt)
-        return response.content + f"\n\n(Sourced from {', '.join([doc.metadata['source'] for doc in relevant_docs])})"
+        return response.content + f"\n\n<small>(Sourced from {', '.join([doc.metadata['source'] for doc in relevant_docs])})</small>"
     else:
         return "QDRANT_URL is not set. Cannot perform RAG query."
 
-initialize_db()
-docs = load_documents()
-prepared_docs = prepare_documents(docs)
-chunks = create_chunks(prepared_docs)
-print(f"Prepared {len(chunks)} chunks for Qdrant")
-added_docs = add_to_qrant(chunks)
-print(f"Added {len(added_docs)} chunks to Qdrant collection '{QDRANT_DOCS_COLLECTION}'")
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    return render_template("chat.html")
+
+@socketio.on('send')
+def on_send(data):
+    query   = (data.get('text') or '')
+    emit('message', f"{markdown2.markdown(query)}", broadcast=True)
+    answer = query_rag(query)
+    emit('message', f"{markdown2.markdown(answer)}", broadcast=True)
+
+if __name__ == "__main__":
+    initialize_db()
+    docs = load_documents()
+    prepared_docs = prepare_documents(docs)
+    chunks = create_chunks(prepared_docs)
+    print(f"Prepared {len(chunks)} chunks for Qdrant")
+    added_docs = add_to_qrant(chunks)
+    print(f"Added {len(added_docs)} chunks to Qdrant collection '{QDRANT_DOCS_COLLECTION}'")
+    socketio.run(app, debug=True)
