@@ -1,6 +1,7 @@
 import os
 import hashlib
 import uuid
+import sqlite3
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from langchain_core.documents import Document
@@ -17,6 +18,32 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 
 llm = ChatOllama(model=OLLAMA_CHAT_MODEL, temperature=0.2)
+docdb = sqlite3.connect("document-memory.db")
+
+def initialize_db():
+    cursor = docdb.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chunks (
+                    content_hash TEXT PRIMARY KEY,
+                    chunk_id TEXT KEY
+                )
+            ''')
+    docdb.commit()
+
+def check_chunk_changed(chunk_id, content_hash):
+    cursor = docdb.cursor()
+    print(f"Checking chunk {chunk_id}")
+    cursor.execute("SELECT content_hash FROM chunks WHERE chunk_id = ?", (chunk_id,))
+    result = cursor.fetchone()
+    if result:
+        return result[0] != content_hash
+    else:
+        return True  # Chunk does not exist, so it is considered changed
+
+def add_chunk(chunk_id, content_hash):
+    cursor = docdb.cursor()
+    cursor.execute("INSERT INTO chunks (chunk_id, content_hash) VALUES (?, ?)", (chunk_id, content_hash))
+    docdb.commit()
 
 def get_embeddings_function():
      embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
@@ -56,11 +83,17 @@ def create_chunks(documents):
     for doc in documents:
         chunks = text_splitter.split_text(doc.page_content)
         for i, chunk in enumerate(chunks):
-            chunk_metadata = doc.metadata.copy()
-            chunk_metadata['chunk_no'] = i
             hex_id = hashlib.sha256(f"{doc.metadata['source']}:{doc.metadata['page'] if 'page' in doc.metadata else '0'}:{i}".encode()).hexdigest()
+
             chunk_id = str(uuid.UUID(hex_id[:32]))
-            all_chunks.append(Document(id=chunk_id, vector=None, page_content=chunk, metadata=chunk_metadata))
+            if check_chunk_changed(chunk_id, hashlib.sha256(chunk.encode()).hexdigest()):
+                chunk_metadata = doc.metadata.copy()
+                chunk_metadata['chunk_no'] = i
+                all_chunks.append(Document(id=chunk_id, vector=None, page_content=chunk, metadata=chunk_metadata))
+                add_chunk(chunk_id, hashlib.sha256(chunk.encode()).hexdigest())
+            else:
+                print(f"Chunk {i} of document {doc.metadata['source']} unchanged, skipping.")
+         
     return all_chunks
 
 def add_to_qrant(chunks):
@@ -92,19 +125,10 @@ def query_rag(query: str):
     else:
         return "QDRANT_URL is not set. Cannot perform RAG query."
 
-if __name__ == "__main__":
-    docs = load_documents()
-    prepared_docs = prepare_documents(docs)
-    chunks = create_chunks(prepared_docs)
-    added_docs = add_to_qrant(chunks)
-    print(f"Added {len(added_docs)} chunks to Qdrant collection '{QDRANT_DOCS_COLLECTION}'")
-
-    print("Type into stdin to chat. Ctrl+C to exit.\n")
-    try:
-        while True:
-            user = input("> ").strip()
-            if user:
-                answer = query_rag(user)
-                print(answer)
-    except KeyboardInterrupt:
-        pass
+initialize_db()
+docs = load_documents()
+prepared_docs = prepare_documents(docs)
+chunks = create_chunks(prepared_docs)
+print(f"Prepared {len(chunks)} chunks for Qdrant")
+added_docs = add_to_qrant(chunks)
+print(f"Added {len(added_docs)} chunks to Qdrant collection '{QDRANT_DOCS_COLLECTION}'")

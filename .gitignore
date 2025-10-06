@@ -1,3 +1,5 @@
 .venv
 data/*
 !data/.gitkeep
+document-memory.db
+__pycache__/main.cpython-311.pyc
