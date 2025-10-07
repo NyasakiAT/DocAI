@@ -78,7 +78,7 @@ def prepare_documents(documents):
                 merged_docs[doc.metadata['source']].page_content += "\n" + doc.page_content
         else:
             # For PDFs and other files, keep them as is
-            merged_docs[doc.metadata['source'] + f"_{doc.metadata['page']}"] = doc
+            merged_docs[doc.metadata['source'] + f"_{doc.metadata['page'] if 'page' in doc.metadata else '0'}"] = doc
     return list(merged_docs.values())
 
 def create_chunks(documents):
