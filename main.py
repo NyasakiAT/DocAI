@@ -19,16 +19,15 @@ from fastembed import SparseTextEmbedding
 QDRANT_DOCS_COLLECTION = "docs"
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gpt-oss:20b")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
-#DENSE_EMBED_MODEL = os.getenv("DENSE_EMBED_MODEL", "nomic-ai/nomic-embed-text-v2-moe")
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 dense_model = SentenceTransformer("nomic-ai/nomic-embed-text-v2-moe", trust_remote_code=True)
 
 sparse_model = SparseTextEmbedding("Qdrant/bm25")
 llm = ChatOllama(model=OLLAMA_CHAT_MODEL, temperature=0.2)
 docdb = sqlite3.connect("document-memory.db")
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)#
 
 def initialize_db():
     cursor = docdb.cursor()
@@ -42,7 +41,7 @@ def initialize_db():
 
 def check_chunk_changed(chunk_id, content_hash):
     cursor = docdb.cursor()
-    print(f"Checking chunk {chunk_id}")
+    #print(f"Checking chunk {chunk_id}")
     cursor.execute("SELECT content_hash FROM chunks WHERE chunk_id = ?", (chunk_id,))
     result = cursor.fetchone()
     if result:
@@ -106,9 +105,23 @@ def create_chunks(documents):
          
     return all_chunks
 
+def upsert_in_batches(client, collection, points, max_points=100, max_bytes=8_000_000):
+    batch, byte_budget = [], 0
+    for p in points:
+        # crude byte estimate: length of text payload + a little overhead
+        t = (p.payload or {}).get("text", "")
+        size = len(t.encode("utf-8")) + 1024  # ~1KB overhead
+        if batch and (len(batch) >= max_points or byte_budget + size > max_bytes):
+            client.upsert(collection_name=collection, points=batch)
+            batch, byte_budget = [], 0
+        batch.append(p)
+        byte_budget += size
+    if batch:
+        client.upsert(collection_name=collection, points=batch)
+
 def add_to_qrant(chunks):
     if QDRANT_URL:
-        qclient = QdrantClient(url=QDRANT_URL)       # your llama.cpp/nomic embedder
+        qclient = QdrantClient(url=QDRANT_URL, prefer_grpc=True)       # your llama.cpp/nomic embedder
         dense_vecs = dense_model.encode([c.page_content for c in chunks], normalize_embeddings=True)
         sparse_vecs = list(sparse_model.embed([c.page_content for c in chunks]))
         points = []
@@ -123,17 +136,21 @@ def add_to_qrant(chunks):
 
             points.append(
                 qm.PointStruct(
-                    id=i,
+                    id=c.id,
                     vector={
                         "dense": dense_vecs[i].tolist(),
                         "sparse": sparse_vector, 
                     },
                     payload={
                         "text": c.page_content,
-                        "metadata": c.metadata,
+                        "source": c.metadata.get("source"),
+                        "page": c.metadata.get("page"),
+                        "chunk_no": c.metadata.get("chunk_no"),
+                        "chunk_id": c.id,
                     },
                 )
             )
+        upsert_in_batches(qclient, "docs", points, max_points=100, max_bytes=8_000_000)
         qclient.upsert("docs", points)
         return len(points)
 
@@ -143,7 +160,7 @@ def _to_qdrant_sparse(fe_sparse):
     vals = list(map(float, fe_sparse.values))
     return qm.SparseVector(indices=idxs, values=vals)
     
-def query_rag(query: str, k: int = 3, alpha: float = 0.7):
+def query_rag(query: str, k: int = 10, alpha: float = 0.7):
     print(f"RAG Query: {query}")
     if QDRANT_URL:
         qclient = QdrantClient(url=QDRANT_URL)
@@ -181,7 +198,7 @@ def query_rag(query: str, k: int = 3, alpha: float = 0.7):
         prompt = f"If needed use the following context to answer the users message:\n{context}\n\nAnswer the following question: {query}"
 
         response = llm.invoke(prompt)
-        sources = ", ".join(doc.metadata['metadata']['source'] for doc in relevant_docs)
+        sources = ", ".join(doc.metadata['source'] for doc in relevant_docs)
         print("Query Done.")
         return f"{response.content}\n\n<small>(Sourced from {sources})</small>"
     else:
