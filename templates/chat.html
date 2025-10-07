@@ -9,9 +9,9 @@
       <!-- messages -->
     </div>
     <form id="f" class="mt-2">
-      <input id="chat-prompt"
-             class="input is-medium"
-             placeholder="Chat here..." />
+      <div id="chat-prompt-wrapper" class="control is-medium">
+        <input id="chat-prompt" class="input is-medium" placeholder="Chat here..." />
+      </div>
       <input type="submit" hidden />
     </form>
   </div>
@@ -19,24 +19,38 @@
 
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
 <script>
-    const s = io();
-    const chat = document.getElementById('chat');
+  const s = io();
+  const chat = document.getElementById('chat');
+  const chatPrompt = document.getElementById('chat-prompt');
+  const chatPromptWrapper = document.getElementById('chat-prompt-wrapper');
 
-    function add(text) {
-        const d = document.createElement('div');
-        d.innerHTML = text;
-        d.setAttribute('class', 'box is-shadowless');
-        chat.appendChild(d);
-        chat.scrollTop = chat.scrollHeight;
+  function add(text) {
+    const d = document.createElement('div');
+    d.innerHTML = text;
+    d.setAttribute('class', 'box is-shadowless');
+    chat.appendChild(d);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function toogleLoading(isLoading) {
+    if (isLoading) {
+      chatPrompt.setAttribute('disabled', 'true');
+      chatPromptWrapper.classList.add('is-loading');
+    } else {
+      chatPrompt.removeAttribute('disabled');
+      chatPromptWrapper.classList.remove('is-loading');
+      chatPrompt.focus();
     }
+  }
 
-    s.on('message', payload => add(payload));
+  s.on('message', payload => add(payload));
+  s.on('loading', payload => toogleLoading(payload));
 
-    document.getElementById('f').addEventListener('submit', e => {
-        e.preventDefault();
-        const msg = document.getElementById('chat-prompt').value.trim();
-        if (!msg) return;
-        s.emit('send', { text: msg });
-        document.getElementById('chat-prompt').value = '';
-    });
+  document.getElementById('f').addEventListener('submit', e => {
+    e.preventDefault();
+    const msg = document.getElementById('chat-prompt').value.trim();
+    if (!msg) return;
+    s.emit('send', { text: msg });
+    document.getElementById('chat-prompt').value = '';
+  });
 </script>

@@ -15,3 +15,6 @@ markdown2
 flask
 Flask-SocketIO
 eventlet
+fastembed 
+sentence_transformers
+einops

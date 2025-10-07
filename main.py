@@ -10,16 +10,21 @@ from langchain_ollama import ChatOllama
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain.document_loaders import DirectoryLoader, TextLoader, UnstructuredWordDocumentLoader, UnstructuredMarkdownLoader
 from langchain.document_loaders.pdf import PyPDFDirectoryLoader
-from flask import Flask, render_template
+from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
+from qdrant_client.http import models as qm
+from sentence_transformers import SentenceTransformer
+from fastembed import SparseTextEmbedding
 
 QDRANT_DOCS_COLLECTION = "docs"
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gpt-oss:20b")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+#DENSE_EMBED_MODEL = os.getenv("DENSE_EMBED_MODEL", "nomic-ai/nomic-embed-text-v2-moe")
+dense_model = SentenceTransformer("nomic-ai/nomic-embed-text-v2-moe", trust_remote_code=True)
 
+sparse_model = SparseTextEmbedding("Qdrant/bm25")
 llm = ChatOllama(model=OLLAMA_CHAT_MODEL, temperature=0.2)
 docdb = sqlite3.connect("document-memory.db")
 app = Flask(__name__)
@@ -47,12 +52,11 @@ def check_chunk_changed(chunk_id, content_hash):
 
 def add_chunk(chunk_id, content_hash):
     cursor = docdb.cursor()
-    cursor.execute("INSERT INTO chunks (chunk_id, content_hash) VALUES (?, ?)", (chunk_id, content_hash))
+    cursor.execute("""
+        INSERT INTO chunks (chunk_id, content_hash) VALUES (?, ?)
+        ON CONFLICT(chunk_id) DO UPDATE SET content_hash=excluded.content_hash
+    """, (chunk_id, content_hash))
     docdb.commit()
-
-def get_embeddings_function():
-     embeddings = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL)
-     return embeddings
 
 def load_documents():
     loaders = [
@@ -104,33 +108,95 @@ def create_chunks(documents):
 
 def add_to_qrant(chunks):
     if QDRANT_URL:
-        qclient = QdrantClient(url=QDRANT_URL)
-        vectorstore = QdrantVectorStore(
-            client=qclient,
-            collection_name=QDRANT_DOCS_COLLECTION,
-            embedding=get_embeddings_function(),
-        )
-        return vectorstore.add_documents(chunks)
-    else:
-        print("QDRANT_URL is not set. Skipping adding to Qdrant.")
-        return 0
+        qclient = QdrantClient(url=QDRANT_URL)       # your llama.cpp/nomic embedder
+        dense_vecs = dense_model.encode([c.page_content for c in chunks], normalize_embeddings=True)
+        sparse_vecs = list(sparse_model.embed([c.page_content for c in chunks]))
+        points = []
+        for i, c in enumerate(chunks):
+            # Convert sparse vector to Qdrant SparseVector
+            sv = sparse_vecs[i]
+            # FastEmbed returns something with .indices and .values
+            sparse_vector = qm.SparseVector(
+                indices=list(map(int, sv.indices)),
+                values=list(map(float, sv.values))
+            )
+
+            points.append(
+                qm.PointStruct(
+                    id=i,
+                    vector={
+                        "dense": dense_vecs[i].tolist(),
+                        "sparse": sparse_vector, 
+                    },
+                    payload={
+                        "text": c.page_content,
+                        "metadata": c.metadata,
+                    },
+                )
+            )
+        qclient.upsert("docs", points)
+        return len(points)
+
+def _to_qdrant_sparse(fe_sparse):
+    # FastEmbed `embed()` element -> qm.SparseVector
+    idxs = list(map(int, fe_sparse.indices))
+    vals = list(map(float, fe_sparse.values))
+    return qm.SparseVector(indices=idxs, values=vals)
     
-def query_rag(query: str):
+def query_rag(query: str, k: int = 3, alpha: float = 0.7):
+    print(f"RAG Query: {query}")
     if QDRANT_URL:
         qclient = QdrantClient(url=QDRANT_URL)
-        vectorstore = QdrantVectorStore(
-            client=qclient,
+
+        dense_q = dense_model.encode([query], normalize_embeddings=True)[0]
+
+        sparse_q_fe = list(sparse_model.embed([query]))[0]
+        sparse_q = _to_qdrant_sparse(sparse_q_fe)
+
+        res = qclient.query_points(
             collection_name=QDRANT_DOCS_COLLECTION,
-            embedding=get_embeddings_function(),
+            query=dense_q.tolist(),         
+            using="dense", 
+            prefetch=[
+                qm.Prefetch(query=dense_q, using="dense", limit=max(20, k*4)),
+                qm.Prefetch(query=sparse_q, using="sparse", limit=max(20, k*4)),
+            ],
+            limit=max(20, k*4),          
+            with_payload=True,
+            with_vectors=False,
+            search_params=qm.SearchParams(hnsw_ef=128, exact=False),
         )
-        relevant_docs = vectorstore.similarity_search(query, k=3)
+
+        # 3) Take top-k (Qdrant blends scores internally in prefetch mode)
+        points = res.points[:k]
+
+        relevant_docs = []
+        for p in points:
+            text = p.payload.get("text", "")
+            metadata = p.payload.copy()
+            metadata.pop("text", None)
+            relevant_docs.append(Document(page_content=text, metadata=metadata))
+
         context = "\n\n".join([doc.page_content for doc in relevant_docs])
         prompt = f"If needed use the following context to answer the users message:\n{context}\n\nAnswer the following question: {query}"
+
         response = llm.invoke(prompt)
-        return response.content + f"\n\n<small>(Sourced from {', '.join([doc.metadata['source'] for doc in relevant_docs])})</small>"
+        sources = ", ".join(doc.metadata['metadata']['source'] for doc in relevant_docs)
+        print("Query Done.")
+        return f"{response.content}\n\n<small>(Sourced from {sources})</small>"
     else:
         return "QDRANT_URL is not set. Cannot perform RAG query."
 
+def _process_and_reply(sid, query):
+    try:
+        socketio.emit('loading', True, to=sid)
+        socketio.sleep(0)
+        answer = query_rag(query)
+        socketio.emit('message', markdown2.markdown(answer), to=sid)
+    except Exception as e:
+        socketio.emit('message', f"<pre>{e}</pre>", to=sid)
+    finally:
+        socketio.emit('loading', False, to=sid)
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -138,10 +204,10 @@ def index():
 
 @socketio.on('send')
 def on_send(data):
-    query   = (data.get('text') or '')
-    emit('message', f"{markdown2.markdown(query)}", broadcast=True)
-    answer = query_rag(query)
-    emit('message', f"{markdown2.markdown(answer)}", broadcast=True)
+    sid = request.sid
+    query = (data.get('text') or '')
+    emit('message', markdown2.markdown(query), to=sid)
+    socketio.start_background_task(_process_and_reply, sid, query)
 
 if __name__ == "__main__":
     initialize_db()
@@ -149,6 +215,7 @@ if __name__ == "__main__":
     prepared_docs = prepare_documents(docs)
     chunks = create_chunks(prepared_docs)
     print(f"Prepared {len(chunks)} chunks for Qdrant")
-    added_docs = add_to_qrant(chunks)
-    print(f"Added {len(added_docs)} chunks to Qdrant collection '{QDRANT_DOCS_COLLECTION}'")
-    socketio.run(app, debug=True)
+    if len(chunks) > 0:
+        added_docs = add_to_qrant(chunks)
+        print(f"Added {added_docs} chunks to Qdrant collection '{QDRANT_DOCS_COLLECTION}'")
+    socketio.run(app)
