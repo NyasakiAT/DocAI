@@ -19,9 +19,10 @@
 
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
 <script>
-  const s = io({
-    transports: ['websocket'],   
-    upgrade: false,              
+    const s = io("/", {
+        path: "/socket.io",
+        transports: ["websocket", "polling"],
+        upgrade: false,
   });
   const chat = document.getElementById('chat');
   const chatPrompt = document.getElementById('chat-prompt');

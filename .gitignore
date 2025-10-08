@@ -1,5 +1,6 @@
 .venv
 data/*
 !data/.gitkeep
-document-memory.db
+docs.sqlite
 __pycache__
+.idea/*

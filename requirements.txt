@@ -1,3 +1,4 @@
+langchain-core
 langchain==0.3.27
 langchain-community==0.3.17
 langchain-ollama==0.3.6
@@ -11,10 +12,11 @@ pytest
 unstructured
 python-docx
 markdown
-markdown2
-flask
-Flask-SocketIO
-eventlet
+flask>=3.0
+flask-socketio>=5.3
+python-socketio>=5.11
+python-engineio>=4.9
 fastembed 
 sentence_transformers
 einops
+pdfminer.six
